@@ -2,7 +2,7 @@
 // an in-memory fake of the bits of SupabaseClient it uses — no live services.
 
 import { assertEquals } from "@std/assert";
-import { recordOwnership } from "./ownership.ts";
+import { evidenceIdInRefs, recordOwnership } from "./ownership.ts";
 
 interface CredRow {
   user_id: string;
@@ -45,6 +45,14 @@ Deno.test("recordOwnership inserts an active row for the user", async () => {
   assertEquals(db.creds[0].user_id, "user_1");
   assertEquals(db.creds[0].credential_id, "cred_1");
   assertEquals(db.creds[0].status, "active");
+});
+
+Deno.test("evidenceIdInRefs matches bare, prefixed, and rejects unbound", () => {
+  assertEquals(evidenceIdInRefs(["ev_1", "ev_2"], "ev_1"), true);
+  assertEquals(evidenceIdInRefs(["evidence:ev_1"], "ev_1"), true);
+  assertEquals(evidenceIdInRefs(["sha256:abc:ev_1"], "ev_1"), true);
+  assertEquals(evidenceIdInRefs(["ev_1"], "ev_2"), false); // unbound → denied
+  assertEquals(evidenceIdInRefs([], "ev_1"), false);
 });
 
 Deno.test("recordOwnership is idempotent on re-issue/retry", async () => {

@@ -67,6 +67,21 @@ export async function recordOwnership(
   if (error) throw new Error(`ownership record failed: ${error.message}`);
 }
 
+/**
+ * Does `evidenceId` appear in a credential's `evidence_refs`? Owning a
+ * credential must NOT grant access to arbitrary evidence ids — the client
+ * pairs an evidence id with a credential_id it owns, so the BFF has to confirm
+ * the evidence is actually bound to that credential rather than trust the
+ * pairing (otherwise a user could read another credential's evidence by
+ * naming one of their own). Refs may be bare (`ev_x`), prefixed
+ * (`evidence:ev_x`), or other colon-delimited forms — match the last segment.
+ */
+export function evidenceIdInRefs(refs: string[], evidenceId: string): boolean {
+  return refs.some(
+    (r) => r === evidenceId || r.split(":").pop() === evidenceId,
+  );
+}
+
 /** All credential ids this user owns in this org+environment (active only). */
 export async function listOwnedCredentialIds(
   db: SupabaseClient,

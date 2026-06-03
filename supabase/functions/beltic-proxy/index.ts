@@ -41,6 +41,7 @@ import {
 } from "../_shared/beltic.ts";
 import { corsHeaders, handlePreflight, jsonError } from "../_shared/http.ts";
 import {
+  evidenceIdInRefs,
   findOwnedCredential,
   listOwnedCredentialIds,
   recordOwnership,
@@ -199,8 +200,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     // --- GET /evidence/:id  and  /evidence/:id/download -----------------
     // Evidence is owned transitively through its parent credential. The client
-    // must name the parent credential via `?credential_id=` so the BFF can run
-    // the ownership check; without it we cannot authorize and refuse.
+    // names the parent credential via `?credential_id=`; the BFF then checks
+    // (1) the user owns that credential AND (2) the evidence is actually bound
+    // to it (in its evidence_refs). Both are required — owning a credential
+    // must not grant access to arbitrary evidence ids.
     const evMatch = path.match(/^\/evidence\/([^/]+)(\/download)?$/);
     if (evMatch) {
       const evidenceId = decodeURIComponent(evMatch[1]);
@@ -223,6 +226,31 @@ Deno.serve(async (req: Request): Promise<Response> => {
         return jsonError(
           403,
           "You do not own the credential for this evidence",
+        );
+      }
+      // Owning the credential isn't enough — confirm the evidence is actually
+      // bound to it. The client pairs the two; trusting that pairing would let
+      // a user read any org evidence by naming a credential they own. Fetch the
+      // credential and check its evidence_refs.
+      const credRes = await belticGet(
+        config,
+        environment,
+        user.id,
+        `/v1/credentials/${encodeURIComponent(credentialId)}`,
+      );
+      if (!credRes.ok) {
+        return jsonError(
+          403,
+          "You do not own the credential for this evidence",
+        );
+      }
+      const cred = (await credRes.json().catch(() => null)) as
+        | { evidence_refs?: string[] }
+        | null;
+      if (!evidenceIdInRefs(cred?.evidence_refs ?? [], evidenceId)) {
+        return jsonError(
+          403,
+          "This evidence is not part of the named credential",
         );
       }
       const suffix = isDownload ? "/download" : "";
