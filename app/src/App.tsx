@@ -18,6 +18,7 @@ import { setUser as setSentryUser, clearUser as clearSentryUser } from "./lib/se
 import { loadTheme } from "./lib/theme";
 import { isAuthConfigured } from "./lib/supabase";
 import { installDeepLinkListener } from "./lib/auth";
+import { startBelticEngineSync } from "./lib/beltic-sync";
 import { useSession } from "./hooks/use-session";
 import { SignInScreen } from "./components/auth/sign-in-screen";
 import { PersonalAssistantOnboarding } from "./components/onboarding/personal-assistant-onboarding";
@@ -101,6 +102,11 @@ export default function App() {
     if (!isAuthConfigured()) return;
     return installDeepLinkListener();
   }, []);
+
+  // Keep the engine's Beltic forwarder configured with the live Supabase
+  // session (URL + anon key + auto-refreshing access token). No-op when auth
+  // isn't configured.
+  useEffect(() => startBelticEngineSync(), []);
 
   const { data: session, isLoading: sessionLoading } = useSession();
 

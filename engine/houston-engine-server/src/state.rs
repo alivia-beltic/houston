@@ -2,6 +2,8 @@
 
 use crate::config::ServerConfig;
 use crate::mobile_access::MobileAccessStore;
+use crate::routes::beltic::BelticRuntime;
+use tokio::sync::RwLock;
 use anyhow::{Context, Result};
 use houston_db::Database;
 use houston_engine_core::routines::scheduler::RoutineSchedulerState;
@@ -32,6 +34,11 @@ pub struct ServerState {
     pub mobile_access: MobileAccessStore,
     /// Pending binary attachment uploads keyed by upload id.
     pub attachment_uploads: AttachmentUploadStore,
+    /// Runtime Beltic BFF config (supabase url/anon/access-token). `None` until
+    /// the frontend pushes it via `PUT /v1/beltic-config` (or it's seeded from
+    /// env for headless deployments). Behind a lock so the access token can be
+    /// refreshed mid-session. See `routes::beltic`.
+    pub beltic: Arc<RwLock<Option<BelticRuntime>>>,
 }
 
 impl ServerState {
@@ -93,6 +100,10 @@ impl ServerState {
         let mobile_access = MobileAccessStore::new(db);
         let tunnel_runtime = tunnel_identity.map(TunnelRuntimeState::new);
 
+        // Seed Beltic from env (headless fallback). Desktop leaves this None
+        // and the frontend configures it at runtime via PUT /v1/beltic-config.
+        let beltic = Arc::new(RwLock::new(BelticRuntime::from_env()));
+
         Self {
             config,
             events,
@@ -102,6 +113,7 @@ impl ServerState {
             tunnel_runtime,
             mobile_access,
             attachment_uploads: AttachmentUploadStore::default(),
+            beltic,
         }
     }
 }

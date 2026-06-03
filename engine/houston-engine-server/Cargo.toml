@@ -38,6 +38,9 @@ houston-ui-events = { workspace = true }
 houston-terminal-manager = { workspace = true }
 houston-file-watcher = { workspace = true }
 anyhow = { workspace = true }
+# Beltic BFF forwarder (routes::beltic). rustls-tls + no defaults to match the
+# core crate and keep the TLS stack consistent across the engine.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
