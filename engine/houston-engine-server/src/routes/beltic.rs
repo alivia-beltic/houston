@@ -106,19 +106,36 @@ async fn set_config(
     Ok(Json(serde_json::json!({ "configured": true })))
 }
 
-/// True only for an `https://<host>.supabase.co[:port]` URL. Pins the scheme
-/// (no plaintext token over http) and the Supabase project host (so the
-/// forwarder can't be repointed at an arbitrary host to exfil the bearer).
-/// Pure — unit-tested.
+/// True only for an `https://<host>.supabase.co[:port]` URL with NO userinfo.
+/// Pins the scheme (no plaintext token over http) and the Supabase project host
+/// so the forwarder can't be repointed at an arbitrary host to exfil the user's
+/// bearer. Parses with a real RFC-3986 parser (reqwest's `url`) and reads the
+/// resolved host — a hand-rolled string split is defeated by userinfo tricks
+/// like `https://x.supabase.co:443@evil.com` (real host = evil.com). Pure —
+/// unit-tested incl. those bypasses.
 fn is_valid_supabase_url(url: &str) -> bool {
-    let rest = match url.strip_prefix("https://") {
-        Some(r) => r,
-        None => return false,
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return false,
     };
-    // Host is everything up to the first '/'; drop an optional ':port'.
-    let host = rest.split('/').next().unwrap_or("");
-    let host = host.split(':').next().unwrap_or("");
-    !host.is_empty() && host.ends_with(".supabase.co")
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    // Reject any userinfo: `https://<anything>@host` means the real host is
+    // after the '@', so a `.supabase.co` substring before it is meaningless.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
+    match parsed.host_str() {
+        // host_str excludes userinfo + port and is lowercased for https. Strip a
+        // trailing FQDN dot so `x.supabase.co.` still matches.
+        Some(h) => h
+            .strip_suffix('.')
+            .unwrap_or(h)
+            .to_ascii_lowercase()
+            .ends_with(".supabase.co"),
+        None => false,
+    }
 }
 
 /// Build the beltic-proxy target URL. Pure — unit-tested.
@@ -153,6 +170,12 @@ async fn forward(
     .ok_or_else(|| {
         CoreError::Unavailable("Beltic is not configured (sign in to Houston)".into())
     })?;
+
+    // Reject dot-segments so a crafted path can't climb out of /beltic-proxy/
+    // (defense-in-depth; axum normalizes most, and the host is pinned anyway).
+    if path.split('/').any(|seg| seg == ".." || seg == ".") {
+        return Err(CoreError::BadRequest("invalid path".into()).into());
+    }
 
     let target = build_target_url(&cfg.supabase_url, &path, query.as_deref());
 
@@ -189,6 +212,13 @@ async fn forward(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
+    // Preserve the evidence-download filename hint if upstream set one. Read
+    // headers BEFORE .bytes() consumes the response.
+    let content_disposition = upstream
+        .headers()
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let bytes = upstream
         .bytes()
         .await
@@ -201,6 +231,11 @@ async fn forward(
         HeaderValue::from_str(&content_type)
             .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
     );
+    if let Some(cd) = content_disposition {
+        if let Ok(v) = HeaderValue::from_str(&cd) {
+            resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
     Ok(resp)
 }
 
@@ -224,6 +259,25 @@ mod tests {
         assert!(!is_valid_supabase_url("https://attacker.com/abc.supabase.co")); // path trick
         assert!(!is_valid_supabase_url("ftp://abc.supabase.co"));
         assert!(!is_valid_supabase_url(""));
+    }
+
+    #[test]
+    fn rejects_userinfo_exfil_bypasses() {
+        // Real host is evil.com in all of these — the old string-split was
+        // defeated by the `:443@` form. Reject every userinfo variant.
+        assert!(!is_valid_supabase_url("https://abc.supabase.co:443@evil.com"));
+        assert!(!is_valid_supabase_url("https://abc.supabase.co@evil.com"));
+        assert!(!is_valid_supabase_url("https://user:pass@evil.com"));
+        // Even userinfo that itself looks like evil but host is real supabase:
+        // reject (legit supabase URLs never carry userinfo).
+        assert!(!is_valid_supabase_url("https://evil.com@abc.supabase.co"));
+    }
+
+    #[test]
+    fn accepts_uppercase_and_trailing_dot_host() {
+        // url crate lowercases the host; trailing FQDN dot is stripped.
+        assert!(is_valid_supabase_url("https://ABC.SUPABASE.CO"));
+        assert!(is_valid_supabase_url("https://abc.supabase.co./x"));
     }
 
     #[test]
