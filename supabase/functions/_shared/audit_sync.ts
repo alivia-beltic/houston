@@ -1,13 +1,23 @@
 // Audit-event sync logic for the Houston ownership index.
 //
 // Beltic has no webhook delivery, so Houston keeps `user_credentials` fresh by
-// polling `GET /v1/audit/events?since=<cursor>`. We translate
-// `credential.issued` / `credential.revoked` events into upserts on the
-// ownership index and advance the per-org/env cursor.
+// polling `GET /v1/audit/events?cursor=<cursor>`. We translate
+// `credential.revoked` events into status updates on the ownership index and
+// advance the per-org/env cursor.
 //
-// This module holds the pure-ish logic (event -> upsert, cursor handling) so it
-// can be unit-tested without a live Beltic. The scheduled function
-// `beltic-audit-poll` is the thin wiring around `syncAuditEvents`.
+// OWNERSHIP SOURCE — UNRESOLVED (blocks issue-time ownership): Beltic's audit
+// feed pseudonymizes the subject — it exposes `subject_type` only, with no
+// subject id / human identifier — so this poller CANNOT create ownership rows
+// on `credential.issued`. Ownership must be established at proxy time (the BFF
+// knows the Houston user from their Supabase JWT and can write the row when the
+// user first issues/fetches a credential), OR Beltic must expose the issued-for
+// subject in the audit event. Until that decision lands, the issued branch is a
+// logged no-op; only `credential.revoked` is applied (it keys on credential_id
+// alone, so it needs no subject).
+//
+// This module holds the pure-ish logic so it can be unit-tested without a live
+// Beltic. The scheduled function `beltic-audit-poll` is the thin wiring around
+// `syncAuditEvents`.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
@@ -18,24 +28,26 @@ import {
 
 /**
  * A single Beltic audit event, narrowed to the fields the poller consumes.
- * Beltic returns more; we ignore the rest.
+ * Field names mirror Beltic's `auditEventResponseSchema` exactly. Beltic
+ * returns more fields; we ignore the rest.
  */
 export interface BelticAuditEvent {
   /** e.g. "credential.issued", "credential.revoked", and others we skip. */
-  type: string;
+  event_type: string;
   /** The credential the event concerns. */
   credential_id: string;
   /**
-   * The Houston end-user this credential belongs to — Beltic stores the
-   * X-On-Behalf-Of-Subject it was issued under as the subject/principal.
+   * Subject category only ("user" | "organisation" | "agent"). Beltic does NOT
+   * expose the subject's id in the audit feed (it's pseudonymized), so this
+   * cannot be used to map a credential to a Houston user — see the header note.
    */
-  subject: string;
+  subject_type: string;
 }
 
-/** Beltic's audit feed page shape. */
+/** Beltic's audit feed page shape (mirrors `auditEventListResponseSchema`). */
 export interface BelticAuditPage {
   events: BelticAuditEvent[];
-  /** Cursor to pass as the next `?since=`. Absent/null when caught up. */
+  /** Cursor to pass as the next `?cursor=`. Null when caught up. */
   next_cursor: string | null;
 }
 
@@ -94,23 +106,18 @@ export async function applyEvent(
   environment: BelticEnvironment,
   event: BelticAuditEvent,
 ): Promise<boolean> {
-  if (event.type === "credential.issued") {
-    const { error } = await db.from("user_credentials").upsert(
-      {
-        user_id: event.subject,
-        credential_id: event.credential_id,
-        beltic_org: org,
-        environment,
-        status: "active",
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "credential_id,beltic_org,environment" },
+  if (event.event_type === "credential.issued") {
+    // Cannot create an ownership row here: the audit feed carries no subject id
+    // to attribute the credential to a Houston user (see the header note).
+    // Ownership is established at proxy time instead. Skip, don't fail.
+    console.warn(
+      `[audit-sync] credential.issued ${event.credential_id} skipped — ` +
+        `no subject id in audit feed; ownership set at proxy time`,
     );
-    if (error) throw new Error(`issue upsert failed: ${error.message}`);
-    return true;
+    return false;
   }
 
-  if (event.type === "credential.revoked") {
+  if (event.event_type === "credential.revoked") {
     // Mark revoked rather than delete: keeps the BFF able to distinguish
     // "revoked" from "never owned", and keeps replay idempotent.
     const { error } = await db
@@ -144,7 +151,7 @@ export async function syncAuditEvents(
   let eventsApplied = 0;
 
   for (let page = 0; page < maxPages; page++) {
-    const qs = cursor ? `?since=${encodeURIComponent(cursor)}` : "";
+    const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
     const res = await belticGet(
       config,
       environment,
