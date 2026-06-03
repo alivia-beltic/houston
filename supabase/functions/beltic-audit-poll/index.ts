@@ -6,15 +6,12 @@
 // events, and advances the per-org/env cursor. The heavy lifting lives in
 // `../_shared/audit_sync.ts` (unit-tested independently).
 //
-// SCHEDULING (wiring follow-up, not done here): run this on a cron via Supabase
-// scheduled functions, e.g. in `supabase/config.toml`:
-//
-//   [functions.beltic-audit-poll]
-//   schedule = "*/2 * * * *"   # every 2 minutes
-//
-// or via pg_cron + pg_net calling the function URL with the service-role key.
-// Either way the trigger must present the service-role bearer so RLS-bypassing
-// writes to `user_credentials` succeed.
+// SCHEDULING: wired via pg_cron + pg_net in migration
+// 20260603100000_beltic_audit_poll_cron.sql, which POSTs to this function every
+// 2 minutes with the service-role bearer (URL + key read from Vault). The
+// service-role bearer is what lets the cursor/ownership writes bypass RLS, and
+// is what the isServiceRoleCaller() check below enforces. Provisioning the two
+// Vault secrets is documented in ../BELTIC_BFF_SETUP.md.
 //
 // AUTH: this is an operator endpoint, NOT user-facing. It must be invoked with
 // the service-role key (the scheduler holds it). We reject any caller that is
