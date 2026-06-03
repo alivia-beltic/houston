@@ -38,6 +38,35 @@ export async function findOwnedCredential(
   return data as OwnershipRow | null;
 }
 
+/**
+ * Record proxy-time ownership: the signed-in user just issued this credential
+ * through the BFF (on-behalf-of themselves), so they own it. Idempotent upsert
+ * keyed on (credential_id, beltic_org, environment) — re-issuing or a retry
+ * converges to one active row. This is Houston's ownership SOURCE; the audit
+ * poller only flips status to revoked (Beltic's audit feed carries no subject
+ * id to attribute ownership on its own).
+ */
+export async function recordOwnership(
+  db: SupabaseClient,
+  userId: string,
+  org: string,
+  environment: BelticEnvironment,
+  credentialId: string,
+): Promise<void> {
+  const { error } = await db.from("user_credentials").upsert(
+    {
+      user_id: userId,
+      credential_id: credentialId,
+      beltic_org: org,
+      environment,
+      status: "active",
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "credential_id,beltic_org,environment" },
+  );
+  if (error) throw new Error(`ownership record failed: ${error.message}`);
+}
+
 /** All credential ids this user owns in this org+environment (active only). */
 export async function listOwnedCredentialIds(
   db: SupabaseClient,

@@ -14,12 +14,19 @@
 // Live proxy (no mirror) keeps Beltic the source of truth and makes revocation
 // correct. The org key is never exposed to the client.
 //
-// Routes (all GET), under the function base path `/beltic-proxy`:
-//   GET /credentials                      -> list the user's own credentials
-//   GET /credentials/:id                  -> one credential (ownership-checked)
-//   GET /evidence/:id                     -> evidence metadata (ownership-checked
+// Routes, under the function base path `/beltic-proxy`:
+//   POST /credentials                     -> issue a credential FOR the user;
+//                                            records proxy-time ownership
+//   GET  /credentials                     -> list the user's own credentials
+//   GET  /credentials/:id                 -> one credential (ownership-checked)
+//   GET  /evidence/:id                    -> evidence metadata (ownership-checked
 //                                            against its parent credential)
-//   GET /evidence/:id/download            -> evidence bytes (same check)
+//   GET  /evidence/:id/download           -> evidence bytes (same check)
+//
+// Ownership SOURCE is POST /credentials (the user issues on-behalf-of
+// themselves, so the BFF knows the user from their JWT and records the row).
+// The audit poller only flips status to revoked — Beltic's audit feed carries
+// no subject id to attribute ownership.
 //
 // Environment is selected by the `X-Environment: staging|production` request
 // header (default staging).
@@ -28,6 +35,7 @@ import { authenticateUser, serviceClient } from "../_shared/auth.ts";
 import {
   type BelticEnvironment,
   belticGet,
+  belticPost,
   isBelticEnvironment,
   loadBelticConfig,
 } from "../_shared/beltic.ts";
@@ -35,6 +43,7 @@ import { corsHeaders, handlePreflight, jsonError } from "../_shared/http.ts";
 import {
   findOwnedCredential,
   listOwnedCredentialIds,
+  recordOwnership,
 } from "../_shared/ownership.ts";
 
 /** Strip the function name prefix so we get the app-level route path. */
@@ -67,7 +76,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handlePreflight(req);
   if (preflight) return preflight;
 
-  if (req.method !== "GET") {
+  if (req.method !== "GET" && req.method !== "POST") {
     return jsonError(405, "Method not allowed");
   }
 
@@ -91,6 +100,53 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const path = routePath(url);
 
   try {
+    // --- POST /credentials  (issue for the user; record ownership) ------
+    // This is Houston's ownership SOURCE. The user issues a credential through
+    // the BFF on-behalf-of themselves; on success we record the (user ->
+    // credential) row so subsequent reads + the revoke poller can authorize.
+    if (req.method === "POST" && path === "/credentials") {
+      const requestBody = await req.json().catch(() => null);
+      if (requestBody === null) return jsonError(400, "Invalid JSON body");
+      const res = await belticPost(
+        config,
+        environment,
+        user.id,
+        "/v1/credentials",
+        requestBody,
+      );
+      const text = await res.text();
+      if (res.ok) {
+        // Parse the issued credential id and record ownership before returning.
+        // If Beltic succeeded but we can't read the id, fail loudly — a silent
+        // success would leave the user unable to read what they just issued.
+        let credentialId: string | undefined;
+        try {
+          credentialId = (JSON.parse(text) as { credential_id?: string })
+            .credential_id;
+        } catch {
+          credentialId = undefined;
+        }
+        if (!credentialId) {
+          return jsonError(
+            502,
+            "Beltic issued a credential but the response had no credential_id; ownership not recorded",
+          );
+        }
+        await recordOwnership(
+          db,
+          user.id,
+          config.org,
+          environment,
+          credentialId,
+        );
+      }
+      const headers = new Headers(corsHeaders);
+      headers.set("Content-Type", "application/json");
+      return new Response(text, { status: res.status, headers });
+    }
+
+    if (req.method !== "GET") return jsonError(405, "Method not allowed");
+
     // --- GET /credentials  (list the user's own) ------------------------
     if (path === "/credentials") {
       const ids = await listOwnedCredentialIds(

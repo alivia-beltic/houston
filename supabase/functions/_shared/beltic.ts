@@ -69,3 +69,30 @@ export async function belticGet(
     },
   });
 }
+
+/**
+ * POST to Beltic with the org key, environment, and on-behalf-of principal.
+ * Used to issue a credential for the end user — the `onBehalfOfSubject` is the
+ * Houston user id, so Beltic attributes the issuance to them and the BFF can
+ * record proxy-time ownership from the response. Returns the raw `Response`.
+ */
+export async function belticPost(
+  config: BelticConfig,
+  environment: BelticEnvironment,
+  onBehalfOfSubject: string,
+  path: string,
+  body: unknown,
+): Promise<Response> {
+  const url = `${config.baseUrl}${path}`;
+  return await fetch(url, {
+    method: "POST",
+    headers: {
+      "X-Api-Key": config.apiKey,
+      "X-Environment": environment,
+      "X-On-Behalf-Of-Subject": onBehalfOfSubject,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+}
