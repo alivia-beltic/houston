@@ -47,10 +47,11 @@ Deno.test("recordOwnership inserts an active row for the user", async () => {
   assertEquals(db.creds[0].status, "active");
 });
 
-Deno.test("evidenceIdInRefs matches bare, prefixed, and rejects unbound", () => {
-  assertEquals(evidenceIdInRefs(["ev_1", "ev_2"], "ev_1"), true);
-  assertEquals(evidenceIdInRefs(["evidence:ev_1"], "ev_1"), true);
-  assertEquals(evidenceIdInRefs(["sha256:abc:ev_1"], "ev_1"), true);
+Deno.test("evidenceIdInRefs matches exact + evidence: prefix, rejects others", () => {
+  assertEquals(evidenceIdInRefs(["ev_1", "ev_2"], "ev_1"), true); // bare
+  assertEquals(evidenceIdInRefs(["evidence:ev_1"], "ev_1"), true); // Beltic format
+  // Loose tail-match is rejected — a ref ending in the id must NOT over-match.
+  assertEquals(evidenceIdInRefs(["sha256:abc:ev_1"], "ev_1"), false);
   assertEquals(evidenceIdInRefs(["ev_1"], "ev_2"), false); // unbound → denied
   assertEquals(evidenceIdInRefs([], "ev_1"), false);
 });

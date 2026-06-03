@@ -87,6 +87,16 @@ async fn set_config(
         )
         .into());
     }
+    // Validate the host before we'll ever send the user's Supabase bearer +
+    // anon key to it. Without this, anyone who can reach this endpoint could
+    // repoint the forwarder at an attacker host and harvest the live token (a
+    // credential-exfil / SSRF primitive). Pin https + a Supabase project host.
+    if !is_valid_supabase_url(body.supabase_url.trim()) {
+        return Err(CoreError::BadRequest(
+            "supabase_url must be an https://<project>.supabase.co URL".into(),
+        )
+        .into());
+    }
     let mut guard = state.beltic.write().await;
     *guard = Some(BelticRuntime {
         supabase_url: body.supabase_url.trim_end_matches('/').to_string(),
@@ -94,6 +104,21 @@ async fn set_config(
         access_token: body.access_token,
     });
     Ok(Json(serde_json::json!({ "configured": true })))
+}
+
+/// True only for an `https://<host>.supabase.co[:port]` URL. Pins the scheme
+/// (no plaintext token over http) and the Supabase project host (so the
+/// forwarder can't be repointed at an arbitrary host to exfil the bearer).
+/// Pure — unit-tested.
+fn is_valid_supabase_url(url: &str) -> bool {
+    let rest = match url.strip_prefix("https://") {
+        Some(r) => r,
+        None => return false,
+    };
+    // Host is everything up to the first '/'; drop an optional ':port'.
+    let host = rest.split('/').next().unwrap_or("");
+    let host = host.split(':').next().unwrap_or("");
+    !host.is_empty() && host.ends_with(".supabase.co")
 }
 
 /// Build the beltic-proxy target URL. Pure — unit-tested.
@@ -181,7 +206,25 @@ async fn forward(
 
 #[cfg(test)]
 mod tests {
-    use super::build_target_url;
+    use super::{build_target_url, is_valid_supabase_url};
+
+    #[test]
+    fn accepts_supabase_project_urls() {
+        assert!(is_valid_supabase_url("https://abc.supabase.co"));
+        assert!(is_valid_supabase_url("https://abc.supabase.co/"));
+        assert!(is_valid_supabase_url("https://abc.supabase.co:443/x"));
+    }
+
+    #[test]
+    fn rejects_non_supabase_or_insecure_urls() {
+        assert!(!is_valid_supabase_url("http://abc.supabase.co")); // not https
+        assert!(!is_valid_supabase_url("https://evil.com")); // wrong host
+        assert!(!is_valid_supabase_url("https://abc.supabase.co.evil.com")); // suffix trick
+        assert!(!is_valid_supabase_url("https://evilsupabase.co")); // no dot boundary
+        assert!(!is_valid_supabase_url("https://attacker.com/abc.supabase.co")); // path trick
+        assert!(!is_valid_supabase_url("ftp://abc.supabase.co"));
+        assert!(!is_valid_supabase_url(""));
+    }
 
     #[test]
     fn builds_target_with_path_and_query() {

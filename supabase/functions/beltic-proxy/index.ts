@@ -117,20 +117,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
       );
       const text = await res.text();
       if (res.ok) {
-        // Parse the issued credential id and record ownership before returning.
-        // If Beltic succeeded but we can't read the id, fail loudly — a silent
-        // success would leave the user unable to read what they just issued.
+        // Record ownership from the credential's PUBLIC `id` (cred_<uuid>) —
+        // that's what Beltic's GET / revoke / audit feed all key on.
+        // `credential_id` is the JWT jti and the schema reserves the right to
+        // diverge it from `id`; keying on it would silently break reads the day
+        // they differ. Fail loudly if absent — a silent success would leave the
+        // user unable to read what they just issued.
         let credentialId: string | undefined;
         try {
-          credentialId = (JSON.parse(text) as { credential_id?: string })
-            .credential_id;
+          credentialId = (JSON.parse(text) as { id?: string }).id;
         } catch {
           credentialId = undefined;
         }
         if (!credentialId) {
           return jsonError(
             502,
-            "Beltic issued a credential but the response had no credential_id; ownership not recorded",
+            "Beltic issued a credential but the response had no id; ownership not recorded",
           );
         }
         await recordOwnership(
@@ -149,6 +151,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (req.method !== "GET") return jsonError(405, "Method not allowed");
 
     // --- GET /credentials  (list the user's own) ------------------------
+    // Beltic's list endpoint has NO per-id filter and is org-scoped, so listing
+    // there would return other users' credentials (it silently ignores `?id=`).
+    // Instead, fan out to per-id GET for exactly the ids this user owns (active
+    // only) and assemble the same `{ items, pagination }` envelope Beltic's
+    // collection endpoint returns, so the client sees one consistent shape.
     if (path === "/credentials") {
       const ids = await listOwnedCredentialIds(
         db,
@@ -156,25 +163,32 @@ Deno.serve(async (req: Request): Promise<Response> => {
         config.org,
         environment,
       );
-      if (ids.length === 0) {
-        // Nothing owned: return an empty list rather than hitting Beltic with
-        // an org-wide list the user isn't entitled to see.
-        return new Response(JSON.stringify({ credentials: [] }), {
+      const items: unknown[] = [];
+      for (const id of ids) {
+        const r = await belticGet(
+          config,
+          environment,
+          user.id,
+          `/v1/credentials/${encodeURIComponent(id)}`,
+        );
+        if (r.ok) {
+          items.push(await r.json());
+        } else if (r.status === 404) {
+          continue; // owned index row but gone at Beltic — skip, don't fail
+        } else {
+          return jsonError(502, `Beltic returned ${r.status} listing ${id}`);
+        }
+      }
+      return new Response(
+        JSON.stringify({
+          items,
+          pagination: { next_cursor: null, has_more: false },
+        }),
+        {
           status: 200,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      // Ask Beltic only for the ids this user owns. Beltic's list endpoint
-      // accepts repeated `id` query params; the proxy never lists the whole
-      // org on behalf of one user.
-      const qs = ids.map((id) => `id=${encodeURIComponent(id)}`).join("&");
-      const res = await belticGet(
-        config,
-        environment,
-        user.id,
-        `/v1/credentials?${qs}`,
+        },
       );
-      return forward(res);
     }
 
     // --- GET /credentials/:id -------------------------------------------
@@ -189,6 +203,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
         credentialId,
       );
       if (!owned) return jsonError(403, "You do not own this credential");
+      // Ownership rows are kept after revocation (to distinguish "never owned"
+      // from "revoked"), so a non-null row isn't enough — a revoked credential
+      // must not be readable through the BFF.
+      if (owned.status !== "active") {
+        return jsonError(410, "This credential has been revoked");
+      }
       const res = await belticGet(
         config,
         environment,
@@ -226,6 +246,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
         return jsonError(
           403,
           "You do not own the credential for this evidence",
+        );
+      }
+      if (owned.status !== "active") {
+        return jsonError(
+          410,
+          "The credential for this evidence has been revoked",
         );
       }
       // Owning the credential isn't enough — confirm the evidence is actually

@@ -9,7 +9,7 @@
 -- revocation is always correct. We only keep a thin ownership index so the BFF
 -- can authorize a request before proxying.
 --
--- The index is kept fresh by polling Beltic `GET /v1/audit/events?since=<cursor>`
+-- The index is kept fresh by polling Beltic `GET /v1/audit/events?cursor=<cursor>`
 -- (Beltic has no webhook delivery). `beltic_audit_sync` holds the last-seen
 -- cursor per org/environment so the poller is resumable and idempotent.
 
@@ -55,7 +55,7 @@ create policy "read own credential ownership"
 create table if not exists public.beltic_audit_sync (
   beltic_org     text        not null,
   environment    text        not null check (environment in ('staging', 'production')),
-  -- Opaque cursor returned by Beltic's audit feed; passed back as `?since=`.
+  -- Opaque cursor returned by Beltic's audit feed; passed back as `?cursor=`.
   -- Null before the first successful poll (full backfill from the start).
   last_cursor    text,
   last_synced_at timestamptz,
