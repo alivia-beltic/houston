@@ -6,7 +6,10 @@ import { ChatPanel } from "@houston-ai/chat"
 import type { ChatPanelProps, FeedItem, ToolsAndCardsProps } from "@houston-ai/chat"
 import { SplitView } from "@houston-ai/layout"
 import { KanbanBoard } from "./kanban-board"
+import { KanbanList } from "./kanban-list"
 import { KanbanDetailPanel } from "./kanban-detail-panel"
+import { BulkActionBar } from "./bulk-action-bar"
+import type { BulkActionBarLabels, BulkMoveTarget } from "./bulk-action-bar"
 import type { KanbanCardLabels } from "./kanban-card"
 import type { KanbanItem, KanbanColumn } from "./types"
 
@@ -165,6 +168,28 @@ export interface AIBoardProps {
   composerOverride?: ReactNode
   /** Translated labels for the file-drop overlay and composer notices. Forwarded to ChatPanel. */
   composerLabels?: ChatPanelProps["composerLabels"]
+  /** Left-pane layout. "board" = kanban columns (default); "list" = a single
+   *  column-less vertical list (used by the Archived missions tab). */
+  layout?: "board" | "list"
+  /** Enable per-card multi-select checkboxes (board layout only). */
+  selectable?: boolean
+  /** Ids currently in the multi-select set. */
+  selectedIds?: ReadonlySet<string>
+  /** Toggle a card's membership in the multi-select set. */
+  onToggleSelect?: (item: KanbanItem) => void
+  /** When a selection is active, locks selection to this column id — cards in
+   *  other columns hide their checkbox so a selection can't span sections. */
+  selectionLockColumnId?: string | null
+  /** Floating bulk-action bar config. Rendered when `selectable` and at
+   *  least one card is selected. */
+  bulkActions?: {
+    moveTargets: BulkMoveTarget[]
+    onMove: (status: string) => void
+    onArchive: () => void
+    onDelete: () => void
+    onClear: () => void
+    labels: BulkActionBarLabels
+  }
 }
 
 const DEFAULT_COLUMNS: KanbanColumn[] = [
@@ -235,6 +260,12 @@ export function AIBoard({
   cardLabels,
   composerOverride,
   composerLabels,
+  layout = "board",
+  selectable,
+  selectedIds,
+  onToggleSelect,
+  selectionLockColumnId,
+  bulkActions,
 }: AIBoardProps) {
   const [internalSelectedId, setInternalSelectedId] = useState<string | null>(null)
   const [newPanelOpen, setNewPanelOpen] = useState(false)
@@ -463,25 +494,55 @@ export function AIBoard({
     return () => document.removeEventListener("pointerdown", handler, true)
   }, [showPanel, closePanel])
 
+  const showBulkBar =
+    selectable && bulkActions && (selectedIds?.size ?? 0) > 0
+
   const board = (
-    <div ref={boardRef} className="flex flex-col h-full">
-      <KanbanBoard
-        columns={resolvedColumns}
-        items={items}
-        selectedId={selectedId}
-        highlightedId={highlightedId}
-        runningStatuses={runningStatuses}
-        approveStatuses={approveStatuses}
-        errorStatuses={errorStatuses}
-        onSelect={handleCardSelect}
-        onDelete={onDelete ? handleDelete : undefined}
-        onApprove={onApprove}
-        onRename={onRename}
-        emptyState={emptyState}
-        actions={actions}
-        avatar={cardAvatar}
-        cardLabels={cardLabels}
-      />
+    <div ref={boardRef} className="relative flex flex-col h-full">
+      {layout === "list" ? (
+        <KanbanList
+          items={items}
+          selectedId={selectedId}
+          onSelect={handleCardSelect}
+          onDelete={onDelete ? handleDelete : undefined}
+          emptyState={emptyState}
+          avatar={cardAvatar}
+          cardLabels={cardLabels}
+        />
+      ) : (
+        <KanbanBoard
+          columns={resolvedColumns}
+          items={items}
+          selectedId={selectedId}
+          highlightedId={highlightedId}
+          runningStatuses={runningStatuses}
+          approveStatuses={approveStatuses}
+          errorStatuses={errorStatuses}
+          onSelect={handleCardSelect}
+          onDelete={onDelete ? handleDelete : undefined}
+          onApprove={onApprove}
+          onRename={onRename}
+          emptyState={emptyState}
+          actions={actions}
+          avatar={cardAvatar}
+          cardLabels={cardLabels}
+          selectable={selectable}
+          selectedIds={selectedIds}
+          onToggleSelect={onToggleSelect}
+          selectionLockColumnId={selectionLockColumnId}
+        />
+      )}
+      {showBulkBar && bulkActions && (
+        <BulkActionBar
+          count={selectedIds?.size ?? 0}
+          moveTargets={bulkActions.moveTargets}
+          onMove={bulkActions.onMove}
+          onArchive={bulkActions.onArchive}
+          onDelete={bulkActions.onDelete}
+          onClear={bulkActions.onClear}
+          labels={bulkActions.labels}
+        />
+      )}
     </div>
   )
 

@@ -39,4 +39,8 @@ export interface KanbanColumn {
   onAdd?: () => void
   /** Accessible label for the add button. */
   addLabel?: string
+  /** Node rendered on the right of the column header (e.g. an
+   *  "archive all" icon button). Fully owned by the consumer so any
+   *  confirm dialog / i18n stays out of the library. */
+  headerAction?: React.ReactNode
 }

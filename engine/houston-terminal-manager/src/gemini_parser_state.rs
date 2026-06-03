@@ -149,6 +149,11 @@ fn handle_result(
         // Gemini emits no cost field — see schema findings §3.
         cost_usd: None,
         duration_ms,
+        // Context-usage indicator covers Anthropic + Codex for now. Gemini is
+        // a "coming soon" provider with no published context-window size in
+        // the model catalog, so we leave usage unset until it ships (the token
+        // stats are already in `stats` and can be normalized then).
+        usage: None,
     });
     items
 }
@@ -344,9 +349,10 @@ mod tests {
         let items = parse_gemini_event(RESULT_OK, &mut acc());
         assert_eq!(items.len(), 1);
         match &items[0] {
-            FeedItem::FinalResult { result, cost_usd, duration_ms } => {
+            FeedItem::FinalResult { result, cost_usd, duration_ms, usage } => {
                 assert_eq!(*duration_ms, Some(1200));
                 assert!(cost_usd.is_none(), "gemini emits no cost field");
+                assert!(usage.is_none(), "gemini usage not wired yet");
                 assert!(result.contains("100 tokens"));
             }
             other => panic!("expected FinalResult, got {other:?}"),

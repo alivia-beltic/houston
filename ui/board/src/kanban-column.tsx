@@ -21,6 +21,14 @@ export interface KanbanColumnProps {
   actions?: (item: KanbanItem) => React.ReactNode
   avatar?: React.ReactNode
   cardLabels?: KanbanCardLabels
+  /** Node rendered on the right of the column header (e.g. archive-all). */
+  headerAction?: React.ReactNode
+  /** Enable per-card multi-select checkboxes. */
+  selectable?: boolean
+  /** Ids currently in the multi-select set. */
+  selectedIds?: ReadonlySet<string>
+  /** Toggle a card's membership in the multi-select set. */
+  onToggleSelect?: (item: KanbanItem) => void
 }
 
 export function KanbanColumn({
@@ -41,7 +49,12 @@ export function KanbanColumn({
   actions,
   avatar,
   cardLabels,
+  headerAction,
+  selectable,
+  selectedIds,
+  onToggleSelect,
 }: KanbanColumnProps) {
+  const anySelected = (selectedIds?.size ?? 0) > 0
   return (
     <div className="min-w-[180px] flex-1 flex flex-col h-full min-h-0 rounded-xl bg-secondary">
       {/* Column header */}
@@ -54,6 +67,11 @@ export function KanbanColumn({
             </span>
           )}
         </div>
+        {headerAction && (
+          <div className="absolute right-2 top-1/2 -translate-y-1/2">
+            {headerAction}
+          </div>
+        )}
       </div>
 
       {/* Cards. `pt-1` so the selected ring on the first card isn't
@@ -86,6 +104,12 @@ export function KanbanColumn({
                   actions={actions?.(item)}
                   avatar={avatar}
                   labels={cardLabels}
+                  selectable={selectable}
+                  selectedForBulk={selectedIds?.has(item.id) ?? false}
+                  anySelected={anySelected}
+                  onToggleSelect={
+                    onToggleSelect ? () => onToggleSelect(item) : undefined
+                  }
                 />
               )}
             </motion.div>

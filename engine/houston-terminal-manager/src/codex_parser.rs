@@ -176,10 +176,18 @@ pub fn parse_codex_event(line: &str, acc: &mut CodexAccumulator) -> Vec<FeedItem
             // Emit usage as FinalResult
             if let Some(usage) = &event.usage {
                 let total = usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0);
+                // `turn.completed.usage` is the CUMULATIVE sum of every model
+                // request in the turn, NOT the context-window fill (a turn
+                // with N tool round-trips reports ~N× the real size). Leave
+                // `usage` None here; `session_io::read_codex_stdout` patches in
+                // the accurate last-request usage from the rollout once codex
+                // has exited and flushed it (see `codex_rollout`). The `result`
+                // text keeps the cumulative total for the (non-rendered) record.
                 items.push(FeedItem::FinalResult {
                     result: format!("{total} tokens used"),
                     cost_usd: None,
                     duration_ms: None,
+                    usage: None,
                 });
             }
             items
@@ -575,8 +583,14 @@ mod tests {
         let items = parse_codex_event(line, &mut acc());
         assert_eq!(items.len(), 1);
         match &items[0] {
-            FeedItem::FinalResult { result, .. } => {
+            FeedItem::FinalResult { result, usage, .. } => {
+                // `result` keeps the cumulative total for the record, but
+                // `usage` is intentionally None: the parser can't get the true
+                // context fill from the cumulative `turn.completed.usage`. The
+                // accurate value is patched in from the rollout by
+                // `session_io::read_codex_stdout` (see codex_rollout).
                 assert!(result.contains("24885"));
+                assert!(usage.is_none(), "cumulative turn usage must not be trusted as context fill");
             }
             other => panic!("expected FinalResult, got {other:?}"),
         }

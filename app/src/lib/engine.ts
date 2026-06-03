@@ -107,6 +107,15 @@ export function isEngineReady(): boolean {
   return _client !== null;
 }
 
+/**
+ * The resolved engine `{ baseUrl, token }`, or null before bootstrap. For code
+ * that needs to hit an engine route directly (e.g. the Beltic config push) and
+ * can't go through the typed `HoustonClient`.
+ */
+export function getEngineConfig(): { baseUrl: string; token: string } | null {
+  return resolveConfig();
+}
+
 export function getEngine(): HoustonClient {
   if (!_client) {
     throw new Error(
@@ -125,6 +134,25 @@ export function getEngineWs(): EngineWebSocket {
     _ws.connect();
   }
   return _ws;
+}
+
+const restartListeners = new Set<() => void>();
+
+export function onEngineRestarted(listener: () => void): () => void {
+  restartListeners.add(listener);
+  return () => {
+    restartListeners.delete(listener);
+  };
+}
+
+function notifyEngineRestarted() {
+  for (const listener of restartListeners) {
+    try {
+      listener();
+    } catch (err) {
+      console.error("[engine] restart listener failed", err);
+    }
+  }
 }
 
 // --- Tauri event wiring ----------------------------------------------
@@ -159,6 +187,7 @@ listen<{ baseUrl: string; token: string }>(
       }
       _ws = null;
     }
+    notifyEngineRestarted();
   },
 ).catch(() => {
   /* non-Tauri env */

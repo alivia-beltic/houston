@@ -110,3 +110,12 @@ export const supabase: SupabaseClient = createClient(
 );
 
 export const isAuthConfigured = (): boolean => Boolean(URL_ && KEY);
+
+/**
+ * The build-time Supabase URL + anon key. Pushed to the engine's Beltic
+ * forwarder so it can reach `beltic-proxy` (see lib/beltic-sync.ts).
+ */
+export const getSupabasePublicConfig = (): { url: string; anonKey: string } => ({
+  url: URL_,
+  anonKey: KEY,
+});

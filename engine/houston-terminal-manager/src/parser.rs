@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use super::provider::anthropic_classify;
 use super::provider_error_kind::{truncate_excerpt, ProviderError};
-use super::types::{AssistantMessage, ClaudeEvent, ContentBlock, FeedItem, UserMessage};
+use super::types::{
+    AssistantMessage, ClaudeEvent, ContentBlock, FeedItem, TokenUsage, UserMessage,
+};
 
 const ANTHROPIC: &str = "anthropic";
 
@@ -17,6 +19,16 @@ pub struct StreamAccumulator {
     text_buffer: String,
     /// Accumulated thinking across all thinking content blocks.
     thinking_buffer: String,
+    /// Token usage from the most recent (non-partial) assistant message.
+    /// The last assistant message of a turn carries the full prompt size of
+    /// the final API request, so this is the authoritative context-window
+    /// reading. Attached to `FinalResult` when the turn's `result` arrives.
+    ///
+    /// A `StreamAccumulator` is recreated per subprocess (see
+    /// `session_io::read_claude_stdout`), and Claude runs one process per
+    /// turn, so this never carries a stale reading into a later turn — the
+    /// success path also `.take()`s it for hygiene.
+    last_usage: Option<TokenUsage>,
 }
 
 #[derive(Debug)]
@@ -154,6 +166,12 @@ pub fn parse_event(line: &str, acc: &mut StreamAccumulator) -> Vec<FeedItem> {
             if subtype.as_deref() != Some("partial") {
                 acc.text_buffer.clear();
                 acc.thinking_buffer.clear();
+                // Capture this request's usage. Later assistant messages in
+                // the same turn overwrite it, so the final one wins —
+                // exactly the context-window size we want to report.
+                if let Some(usage) = message.as_ref().and_then(|m| m.usage) {
+                    acc.last_usage = Some(usage.normalize());
+                }
             }
             parse_assistant_event(subtype.as_deref(), message)
         }
@@ -164,6 +182,7 @@ pub fn parse_event(line: &str, acc: &mut StreamAccumulator) -> Vec<FeedItem> {
             is_error,
             cost_usd,
             duration_ms,
+            usage: result_usage,
             ..
         } => {
             if subtype.as_deref() == Some("error") || is_error == Some(true) {
@@ -183,10 +202,19 @@ pub fn parse_event(line: &str, acc: &mut StreamAccumulator) -> Vec<FeedItem> {
                     });
                 return vec![FeedItem::ProviderError(typed)];
             }
+            // Prefer the per-request usage captured from the last assistant
+            // message (the true context-window size); fall back to the
+            // terminal event's own usage block when no assistant message
+            // carried one.
+            let usage = acc
+                .last_usage
+                .take()
+                .or_else(|| result_usage.map(|u| u.normalize()));
             vec![FeedItem::FinalResult {
                 result: result.unwrap_or_default(),
                 cost_usd,
                 duration_ms,
+                usage,
             }]
         }
         ClaudeEvent::StreamEvent { event: inner, .. } => acc.handle(inner),
@@ -578,5 +606,62 @@ mod tests {
             FeedItem::ProviderError(_) => {}
             other => panic!("expected ProviderError, got {other:?}"),
         }
+    }
+
+    fn final_result_usage(items: &[FeedItem]) -> Option<TokenUsage> {
+        items.iter().find_map(|i| match i {
+            FeedItem::FinalResult { usage, .. } => *usage,
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn assistant_usage_is_attached_to_final_result() {
+        let mut a = acc();
+        // Final assistant message carrying Anthropic's four-way usage block.
+        let assistant = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1200,"cache_creation_input_tokens":300,"cache_read_input_tokens":150000,"output_tokens":420}}}"#;
+        let _ = parse_event(assistant, &mut a);
+        let result = r#"{"type":"result","result":"Done","session_id":"s1"}"#;
+        let usage =
+            final_result_usage(&parse_event(result, &mut a)).expect("final result carries usage");
+        // context = input + cache_creation + cache_read (all occupy the window).
+        assert_eq!(usage.context_tokens, 1200 + 300 + 150_000);
+        assert_eq!(usage.cached_tokens, 150_000);
+        assert_eq!(usage.output_tokens, 420);
+    }
+
+    #[test]
+    fn last_assistant_usage_wins_within_a_turn() {
+        let mut a = acc();
+        // Two assistant messages (e.g. a tool round-trip): the second has the
+        // larger, more complete context and must be the one reported.
+        let first = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"step"}],"usage":{"input_tokens":1000,"cache_read_input_tokens":0,"output_tokens":10}}}"#;
+        let second = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}],"usage":{"input_tokens":50,"cache_read_input_tokens":2000,"output_tokens":80}}}"#;
+        let _ = parse_event(first, &mut a);
+        let _ = parse_event(second, &mut a);
+        let usage = final_result_usage(&parse_event(
+            r#"{"type":"result","result":"Done"}"#,
+            &mut a,
+        ))
+        .expect("usage present");
+        assert_eq!(usage.context_tokens, 50 + 2000);
+    }
+
+    #[test]
+    fn result_usage_used_when_no_assistant_usage() {
+        // No assistant message this turn — fall back to the terminal event's
+        // own usage block so the indicator still updates.
+        let line = r#"{"type":"result","result":"Done","usage":{"input_tokens":10,"cache_read_input_tokens":90000,"output_tokens":50}}"#;
+        let usage = final_result_usage(&parse_event(line, &mut acc()))
+            .expect("usage from result event");
+        assert_eq!(usage.context_tokens, 10 + 90_000);
+        assert_eq!(usage.cached_tokens, 90_000);
+        assert_eq!(usage.output_tokens, 50);
+    }
+
+    #[test]
+    fn final_result_without_any_usage_is_none() {
+        let line = r#"{"type":"result","result":"Done","session_id":"s1"}"#;
+        assert!(final_result_usage(&parse_event(line, &mut acc())).is_none());
     }
 }

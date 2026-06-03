@@ -23,6 +23,7 @@ import type providers from "../locales/en/providers.json";
 import type errors from "../locales/en/errors.json";
 import type events from "../locales/en/events.json";
 import type portable from "../locales/en/portable.json";
+import type context from "../locales/en/context.json";
 
 declare module "react-i18next" {
   interface CustomTypeOptions {
@@ -44,6 +45,7 @@ declare module "react-i18next" {
       errors: typeof errors;
       events: typeof events;
       portable: typeof portable;
+      context: typeof context;
     };
   }
 }

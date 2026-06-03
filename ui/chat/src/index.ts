@@ -1,6 +1,7 @@
 // === Types ===
 export type {
   FeedItem,
+  TokenUsage,
   RunStatus,
   ToolRuntimeErrorEntry,
   ProviderError,
@@ -214,7 +215,8 @@ export type { UserAttachmentMessageLabels } from "./user-attachment-message";
 
 // === Utilities ===
 export { Typewriter } from "./typewriter";
-export { mergeFeedItem } from "./feed-merge";
+export { mergeFeedItem, mergeFeedHistory, reconcileUserMessageEcho } from "./feed-merge";
+export type { MergeFeedOptions, PendingUserEcho } from "./feed-merge";
 export { ChannelAvatar } from "./channel-avatar";
 export type { ChannelSource } from "./channel-avatar";
 

@@ -34,6 +34,9 @@ pub enum ClaudeEvent {
         cost_usd: Option<f64>,
         duration_ms: Option<u64>,
         session_id: Option<String>,
+        /// Cumulative-turn token usage on the terminal event. Used as a
+        /// fallback when no assistant message carried per-request usage.
+        usage: Option<ClaudeUsageRaw>,
         #[serde(flatten)]
         extra: serde_json::Value,
     },
@@ -81,8 +84,47 @@ pub struct StreamDelta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
     pub content: Option<Vec<ContentBlock>>,
+    /// Per-request token usage Anthropic attaches to each assistant message.
+    /// The final assistant message of a turn reports the full prompt size of
+    /// the last API request — i.e. how much of the context window was used.
+    pub usage: Option<ClaudeUsageRaw>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
+}
+
+/// Raw Anthropic `usage` block, as it appears on `assistant` messages and
+/// the terminal `result` event. Fields default to 0 when absent so an older
+/// CLI that omits a key (e.g. no cache fields) still deserializes. Normalized
+/// into the provider-agnostic [`TokenUsage`] before it reaches the feed.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ClaudeUsageRaw {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+}
+
+impl ClaudeUsageRaw {
+    /// Collapse Anthropic's four-way split into the shared [`TokenUsage`].
+    ///
+    /// Anthropic reports `input_tokens` as the NON-cached fresh input only;
+    /// `cache_read_input_tokens` and `cache_creation_input_tokens` are the
+    /// cached-reuse and cache-write portions. All three occupy the context
+    /// window, so the prompt size = their sum. (Contrast Codex, whose
+    /// `input_tokens` is already the cache-inclusive total.)
+    pub fn normalize(&self) -> TokenUsage {
+        TokenUsage {
+            context_tokens: self.input_tokens
+                + self.cache_creation_input_tokens
+                + self.cache_read_input_tokens,
+            output_tokens: self.output_tokens,
+            cached_tokens: self.cache_read_input_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +155,21 @@ pub enum ContentBlock {
     },
     #[serde(other)]
     Unknown,
+}
+
+/// Provider-agnostic token usage for a completed turn, normalized from each
+/// provider's native `usage` shape (Anthropic's four-way cache split, Codex's
+/// cache-inclusive totals, ...). Drives the chat context-usage indicator.
+///
+/// `context_tokens` is the headline number: the size of the prompt on the
+/// most recent model request, i.e. how much of the context window is in use.
+/// `cached_tokens` (a subset of `context_tokens`) and `output_tokens` are
+/// informational detail for the dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TokenUsage {
+    pub context_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
 }
 
 /// Visible files created or modified during a session.
@@ -185,6 +242,10 @@ pub enum FeedItem {
         result: String,
         cost_usd: Option<f64>,
         duration_ms: Option<u64>,
+        /// Normalized token usage for the turn, when the provider reported it.
+        /// Feeds the chat context-usage indicator; `None` for providers that
+        /// don't surface usage yet.
+        usage: Option<TokenUsage>,
     },
     /// Visible files created or changed during the session.
     FileChanges(FileChanges),

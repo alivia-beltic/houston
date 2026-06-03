@@ -94,6 +94,7 @@ module.
 | POST | `/v1/workspaces` | Create |
 | DELETE | `/v1/workspaces/:id` | Delete |
 | POST | `/v1/workspaces/:id/rename` | Rename |
+| PATCH | `/v1/workspaces/:id/locale` | Set/clear the per-workspace UI-locale override (`{ locale: "es" \| null }`) |
 | PATCH | `/v1/workspaces/:id/provider` | Set provider/model |
 | GET | `/v1/workspaces/:id/context` | Read shared `WORKSPACE.md` + `USER.md` |
 | PUT | `/v1/workspaces/:id/context` | Write shared `WORKSPACE.md` + `USER.md` |
@@ -170,7 +171,7 @@ not user-facing copy.
 | PATCH/DELETE | `/v1/routines/:id` | Update/delete |
 | POST | `/v1/routines/:id/runs` | Create run |
 | POST | `/v1/routines/:id/runs/:run_id:cancel` | Stop an in-flight run (kills the provider PID, marks status `cancelled`). 409 if the run is already terminal. Deleting a routine cascades to this for any `running` runs. |
-| POST | `/v1/routines/:id/run-now` | Manual trigger |
+| POST | `/v1/routines/:id/run-now` | Manual trigger. Returns once the run row is created (404 if the routine is gone, 409 if *this* routine already has a run in flight); the session runs on a detached task — follow it via `RoutineRunsChanged`. Different routines on one agent both run, serialized on the folder; the same routine can't double-run. |
 | GET | `/v1/routine-runs` | List (optional `?routineId`) |
 | PATCH | `/v1/routine-runs/:id` | Update run |
 | POST | `/v1/routines/scheduler/start` | Start per-agent cron |
@@ -208,7 +209,9 @@ not user-facing copy.
 |---|---|---|
 | GET/PUT | `/v1/preferences/:key` | String KV (DB-backed) |
 | GET | `/v1/providers/:name/status` | `{cliInstalled, authState, installSource, cliPath}` |
-| POST | `/v1/providers/:name/login` | Launch CLI login. Returns `BAD_REQUEST` for providers without an OAuth flow (e.g. `gemini`); callers must use the credentials route instead. |
+| POST | `/v1/providers/:name/login` | Launch CLI login. Returns `BAD_REQUEST` for providers without an OAuth flow (e.g. `gemini`); callers must use the credentials route instead. Surfaces the OAuth URL via the `ProviderLoginUrl` WS event and the outcome via `ProviderLoginComplete`. Optional `?deviceAuth=true` selects the provider's headless device-code flow (OpenAI/codex `--device-auth`) for remote clients that can't receive the CLI's `localhost` OAuth callback; ignored by providers without a device variant (Claude keeps its paste-back code), omitted by the co-located desktop app. |
+| POST | `/v1/providers/:name/login/code` | Relay the OAuth verification code the user pasted (paste-back flow, e.g. Claude on a remote/headless engine). Body: `{ code }`. Written to the CLI's stdin. Not used by codex's device-code flow, which self-completes after the user enters the `ProviderLoginUrl.user_code` on the provider's page. |
+| POST | `/v1/providers/:name/login/cancel` | Abort an in-flight sign-in: kills the CLI subprocess and frees the in-flight slot so a retry isn't rejected as "already pending". Idempotent (no-op when nothing pending). Emits a benign `ProviderLoginComplete` (`success: false`, `error: null`) so pending spinners clear without an error toast. Fixes the stuck-spinner-after-closing-browser case. |
 | POST | `/v1/providers/gemini/credentials` | Write `GEMINI_API_KEY` to `~/.gemini/.env` (atomic, mode 0600). Body: `{ apiKey }`. Provider-specific because Gemini is the only provider with file-backed credentials today. |
 | GET | `/v1/agent-configs` | List installed agent definitions |
 
@@ -369,6 +372,70 @@ assistant message in your state; `assistant_text` finalizes it.
 Don't append every streaming delta as a new message row. Same
 pattern for `thinking_streaming` / `thinking`. See
 `examples/smartbooks/src/lib/feed.ts::appendFeedItem`.
+
+### Context-usage lives on `final_result`
+
+The terminal `feed_type: "final_result"` item carries `data: { result,
+cost_usd, duration_ms, usage }`. `usage` is the normalized `TokenUsage`
+`{ context_tokens, output_tokens, cached_tokens }` (Rust
+`houston-terminal-manager::TokenUsage`, TS `@houston-ai/chat` `TokenUsage`)
+or `null` for providers that don't report it (Anthropic + Codex do; Gemini
+doesn't yet). `context_tokens` is the prompt size of the most recent model
+request, i.e. how much of the context window is in use.
+
+- **Anthropic:** the parser sums the last assistant message's three-way split
+  (`input + cache_creation + cache_read`). The per-message usage IS the last
+  request, so this is the live fill.
+- **Codex:** trickier. `codex exec --json` only emits `turn.completed.usage`,
+  which is the CUMULATIVE sum of every model request in the turn (a turn with
+  N tool round-trips reports ~N× the real size — this is the
+  94k-instead-of-19k bug). The real last-request fill + the effective window
+  live ONLY in Codex's on-disk rollout
+  (`$CODEX_HOME/sessions/**/rollout-*-<thread_id>.jsonl`, default
+  `~/.codex`), in `token_count.info.last_token_usage` /
+  `model_context_window`. So `engine codex_rollout::latest_usage(thread_id)`
+  reads the newest rollout's last `token_count` and `session_io` patches it
+  onto the `FinalResult` after the stream flushes (codex only writes the
+  rollout fully on exit, so the held-back FinalResult is emitted post-loop).
+  The parser leaves `usage` None; on any rollout failure it stays None (no %
+  beats a wrong %). Bumping the bundled codex won't help — neither 0.130 nor
+  0.135 `exec --json` exposes the per-request data in stdout.
+
+The desktop composer's context-usage indicator (`app/src/components/context-
+indicator.tsx`) divides the latest turn's `context_tokens` by a window
+estimate for a "% full" gauge; it reads usage via `sessionContextUsage`
+(`app/src/lib/context-usage.ts`) so it works both live and after a history
+reload (the field is persisted in `chat_feed.data_json`). `/context` (the
+interactive Claude Code slash command) is unavailable here because the
+engine drives `claude -p` in non-interactive print mode — the data comes
+from the stream's `usage` blocks, not a REPL command.
+
+**The window is an estimate, by necessity.** The real context window is
+plan/credit-gated and is NOT reported anywhere `claude -p` can see (verified
+against Claude Code 2.1.159: `system init` carries only `model`, `tools`,
+`mcp_servers`, ... — no window field; no flag; no env var; Codex's
+`thread.started` likewise). The gating:
+
+- Opus 4.x → 1M automatic on Max/Team/Enterprise, else 200k (1M needs
+  `/extra-usage` credits on Pro).
+- Sonnet 4.6 → 200k on every plan; 1M only with usage credits.
+- Codex gpt-5.5 → **258,400** effective = raw `context_window` 272k ×
+  `effective_context_window_percent` 95% (both from Codex's `models_cache.json`,
+  and the rollout's `model_context_window` confirms 258400). The opt-in 1M
+  variant maxes at 1M × 95% = 950k.
+
+So the indicator uses a **self-correcting estimate** (`providers.ts`
+`contextWindow` = default assumption, `contextWindowMax` = snap-up ceiling;
+`context-usage.ts` `effectiveContextWindow`): start from the per-model
+default (Opus 1M, Sonnet 200k, gpt-5.5 258.4k), then snap UP to the ceiling
+once the session's observed PEAK `context_tokens` exceeds the default —
+which proves the real window is larger, because both CLIs auto-compact
+before the limit so observed usage can never exceed the true window. This
+auto-fixes Sonnet-with-credits and never reads over 100%. The one case it
+over-estimates is Opus on Pro WITHOUT credits (shows 1M, really 200k); it
+can't self-correct downward, so the dialog labels the figure "estimated".
+If a future CLI release exposes the window in `system init` /
+`thread.started`, prefer that live value over the estimate.
 
 ### Binary file downloads
 

@@ -19,6 +19,8 @@ export interface KanbanCardLabels {
   /** Delete confirm title, `{name}` substituted with `item.title`. */
   deleteTitle?: (name: string) => string
   deleteDescription?: string
+  /** Accessible label for the multi-select checkbox. */
+  selectTooltip?: string
 }
 
 const DEFAULT_LABELS: Required<KanbanCardLabels> = {
@@ -28,6 +30,7 @@ const DEFAULT_LABELS: Required<KanbanCardLabels> = {
   deleteTooltip: "Delete",
   deleteTitle: (name) => `Delete "${name}"?`,
   deleteDescription: "This item and its history will be permanently removed.",
+  selectTooltip: "Select",
 }
 
 export interface KanbanCardProps {
@@ -47,6 +50,15 @@ export interface KanbanCardProps {
   /** Mark this card as keyboard-focused (highlighted via arrow nav, not yet
    *  opened). Renders a focus ring distinct from `selected`. */
   highlighted?: boolean
+  /** Enable the multi-select checkbox. */
+  selectable?: boolean
+  /** Whether this card is part of the current multi-select set. */
+  selectedForBulk?: boolean
+  /** Whether ANY card is currently multi-selected (keeps every checkbox
+   *  visible without hover so the affordance isn't hover-gated). */
+  anySelected?: boolean
+  /** Toggle this card's membership in the multi-select set. */
+  onToggleSelect?: () => void
 }
 
 export function KanbanCard({
@@ -63,6 +75,10 @@ export function KanbanCard({
   labels,
   selected = false,
   highlighted = false,
+  selectable = false,
+  selectedForBulk = false,
+  anySelected = false,
+  onToggleSelect,
 }: KanbanCardProps) {
   const l = { ...DEFAULT_LABELS, ...labels }
   const isRunning = runningStatuses.includes(item.status)
@@ -143,11 +159,48 @@ export function KanbanCard({
               : selected || highlighted
                 ? "border border-transparent"
                 : "border border-border/20 shadow-sm hover:shadow-md",
+          // Multi-select ring sits on top of (not replacing) the card's
+          // own border treatment so a selected running card keeps its glow.
+          selectedForBulk &&
+            "ring-2 ring-primary ring-offset-1 ring-offset-background",
         )}
       >
         {/* Top row: agent info + action buttons */}
         <div className="flex items-center justify-between mb-1.5">
           <div className="flex items-center gap-1.5 min-w-0">
+            {/* Multi-select checkbox. Collapsed to zero width until the card
+                is hovered/focused or a selection is active, so it reveals on
+                hover (pushing the agent name right) yet stays keyboard-
+                reachable — never a hover-only affordance. */}
+            {selectable && onToggleSelect && (
+              <div
+                className={cn(
+                  "shrink-0 overflow-hidden transition-all duration-150",
+                  selectedForBulk || anySelected
+                    ? "w-4 opacity-100"
+                    : "w-0 opacity-0 group-hover/card:w-4 group-hover/card:opacity-100 group-focus-within/card:w-4 group-focus-within/card:opacity-100",
+                )}
+              >
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={selectedForBulk}
+                  aria-label={l.selectTooltip}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onToggleSelect()
+                  }}
+                  className={cn(
+                    "size-4 rounded-[5px] border flex items-center justify-center transition-colors",
+                    selectedForBulk
+                      ? "bg-primary border-primary text-primary-foreground"
+                      : "border-muted-foreground/40 text-transparent hover:border-foreground",
+                  )}
+                >
+                  <Check className="size-3" strokeWidth={3} />
+                </button>
+              </div>
+            )}
             {avatar ?? (
               item.icon && (
                 <span className="size-3.5 shrink-0 flex items-center justify-center">
